@@ -11,3 +11,7 @@ window.READ_ENDPOINT = 'https://defaulta4a0857a652e45f494b1685bad4ec3.bd.environ
 
 /* Fluxo de GRAVAÇÃO de resultados (Gravar_Resultados). */
 window.WRITE_RESULTS_ENDPOINT = 'https://defaulta4a0857a652e45f494b1685bad4ec3.bd.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/ea5dc72a7210439c9f54be22dc43b04a/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=rr_kfLZBPyOFP339Qy9zVLlBE6ThQ2EliP54l1AT5O4';
+
+/* Compartilhamento (card) */
+window.PALPITES_URL = 'https://matheusalho.github.io/Palpites_Mata-Mata/';
+window.SHARE_URL_LABEL = 'bolao.balera.com.br';

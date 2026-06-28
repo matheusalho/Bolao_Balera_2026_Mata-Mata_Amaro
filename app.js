@@ -18,7 +18,11 @@
 
   var realResults = load(LS_RES, {});   // { id: {home,away,homeScorers:[],awayScorers:[]} }
   var participants = load(LS_PART, []); // [{name,cpf,guesses:{id:{home,away,homeScorers,awayScorers}}}]
-  var activeTab = participants.length ? 'ranking' : 'carregar';
+  var READ_ENDPOINT = (window.READ_ENDPOINT || '').trim(); // fluxo de leitura (auto-carrega palpites + resultados). Vazio = só upload manual.
+  var WRITE_RESULTS_ENDPOINT = (window.WRITE_RESULTS_ENDPOINT || '').trim(); // fluxo p/ o Amaro publicar os resultados oficiais.
+  var lastUpdated = load('mm_updatedAt', null);
+  var autoState = ''; // '' | 'loading' | 'ok' | 'error'
+  var activeTab = (participants.length || READ_ENDPOINT) ? 'ranking' : 'carregar';
   var search = '';
 
   // ---------- helpers ----------
@@ -90,20 +94,32 @@
   }
 
   function badges(j) {
-    return (j.brasil ? '<span class="badge b-brasil">BRASIL</span> ' : '') + (j.provisorio ? '<span class="badge b-prov">provisório</span>' : '');
+    return j.brasil ? '<span class="badge b-brasil">BRASIL</span>' : '';
+  }
+
+  function fmtUpdated() {
+    if (!lastUpdated) return '';
+    try { return new Date(lastUpdated).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; }
   }
 
   function renderRanking() {
+    var refreshBtn = READ_ENDPOINT ? '<button class="btn ghost" onclick="MM.atualizar()" title="Recarregar palpites da planilha">↻ Atualizar</button>' : '';
     if (!participants.length) {
-      view.innerHTML = '<div class="card"><div class="empty">Nenhum palpite carregado ainda.<br><br><button class="btn ciano" onclick="MM.go(\'carregar\')">Carregar planilha de palpites</button></div></div>';
+      var inner;
+      if (autoState === 'loading') inner = '<div class="spinner"></div>Carregando palpites da planilha...';
+      else if (READ_ENDPOINT && autoState === 'error') inner = 'Não foi possível carregar automaticamente.<br><br>' + refreshBtn + ' <button class="btn" onclick="MM.go(\'carregar\')">Carregar manualmente</button>';
+      else inner = 'Nenhum palpite carregado ainda.<br><br>' + (READ_ENDPOINT ? refreshBtn + ' ' : '') + '<button class="btn ciano" onclick="MM.go(\'carregar\')">Carregar planilha</button>';
+      view.innerHTML = '<div class="card"><div class="empty">' + inner + '</div></div>';
       return;
     }
     var rk = ranking();
     var finished = JOGOS.filter(function (j) { return hasResult(realResults[j.id]); }).length;
     var filtered = search ? rk.filter(function (x) { return norm(x.name).indexOf(norm(search)) >= 0; }) : rk;
+    var medals = { 1: '🥇', 2: '🥈', 3: '🥉' };
     var rows = filtered.map(function (x) {
-      return '<tr onclick="MM.detalhe(\'' + esc(x.cpf || x.name) + '\')">' +
-        '<td class="rankpos">' + x.pos + 'º</td>' +
+      var cls = x.pos <= 3 ? ' class="p' + x.pos + '"' : '';
+      return '<tr' + cls + ' onclick="MM.detalhe(\'' + esc(x.cpf || x.name) + '\')">' +
+        '<td class="rankpos">' + (medals[x.pos] ? medals[x.pos] + ' ' : '') + x.pos + 'º</td>' +
         '<td class="nome">' + esc(x.name) + '</td>' +
         '<td>' + x.exact + '</td>' +
         '<td>' + x.placarPts + '</td>' +
@@ -111,10 +127,13 @@
         '<td><span class="pill tot">' + x.total + '</span></td>' +
         '</tr>';
     }).join('');
+    var sub = participants.length + ' participantes · ' + finished + '/' + JOGOS.length + ' jogos com resultado'
+      + (lastUpdated ? ' · atualizado ' + fmtUpdated() : '')
+      + (autoState === 'loading' ? ' <span class="loadingdot">• atualizando…</span>' : '');
     view.innerHTML =
       '<div class="card">' +
-      '<div class="hd"><div><h2>Ranking Atualizado</h2><div class="muted">' + participants.length + ' participantes · ' + finished + '/' + JOGOS.length + ' jogos com resultado</div></div>' +
-      '<input class="search" placeholder="Buscar participante..." value="' + esc(search) + '" oninput="MM.busca(this.value)"></div>' +
+      '<div class="hd"><div><h2>Ranking Atualizado</h2><div class="muted">' + sub + '</div></div>' +
+      '<div class="hd-actions">' + refreshBtn + '<input class="search" placeholder="Buscar participante..." value="' + esc(search) + '" oninput="MM.busca(this.value)"></div></div>' +
       '<div class="tablewrap"><table><thead><tr>' +
       '<th>Pos</th><th class="nome">Participante</th><th title="Placares exatos (cravadas)">Cravadas</th><th title="Pontos de placar (10/5)">Placar</th><th title="Pontos de artilheiros (10/15)">Artilheiros</th><th>Total</th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
@@ -122,7 +141,7 @@
       '</div>';
   }
 
-  function scorerEditor(j, side, team, n, values) {
+  function scorerEditor(j, side, team, n, values, ro) {
     if (n <= 0) return '';
     var opts = playersOf(team).concat([GOL_CONTRA]);
     var rows = '';
@@ -131,28 +150,38 @@
       var os = '<option value="">— artilheiro —</option>' + opts.map(function (nm) {
         return '<option value="' + esc(nm) + '"' + (norm(nm) === norm(val) ? ' selected' : '') + '>' + esc(nm) + '</option>';
       }).join('');
-      rows += '<div class="srow"><span class="sidx">' + (i + 1) + '</span><select data-game="' + j.id + '" data-side="' + side + '" data-idx="' + i + '">' + os + '</select></div>';
+      rows += '<div class="srow"><span class="sidx">' + (i + 1) + '</span><select ' + (ro ? 'disabled ' : '') + 'data-game="' + j.id + '" data-side="' + side + '" data-idx="' + i + '">' + os + '</select></div>';
     }
     return '<div class="scol"><h4>Gols de ' + esc(team) + '</h4>' + rows + '</div>';
   }
 
   function renderJogos() {
+    var ro = !IS_AMARO; // só o Amaro edita/publica resultados; Geral é somente leitura
     var cards = JOGOS.map(function (j) {
       var r = realResults[j.id] || { home: '', away: '', homeScorers: [], awayScorers: [] };
       var nh = r.home === '' || r.home == null ? 0 : +r.home;
       var na = r.away === '' || r.away == null ? 0 : +r.away;
+      var dis = ro ? ' disabled' : '';
       return '<div class="game' + (j.brasil ? ' brasil' : '') + '">' +
         '<div class="gh"><span class="gnum">J' + j.id + '</span><span>' + badges(j) + '</span></div>' +
         '<div class="gscore">' +
         '<span class="tn h">' + esc(j.mandante) + '</span>' +
-        '<span class="sc"><input type="text" inputmode="numeric" value="' + (r.home === undefined ? '' : r.home) + '" data-res="' + j.id + '" data-f="home"><span class="sx">x</span><input type="text" inputmode="numeric" value="' + (r.away === undefined ? '' : r.away) + '" data-res="' + j.id + '" data-f="away"></span>' +
+        '<span class="sc"><input type="text" inputmode="numeric"' + dis + ' value="' + (r.home === undefined ? '' : r.home) + '" data-res="' + j.id + '" data-f="home"><span class="sx">x</span><input type="text" inputmode="numeric"' + dis + ' value="' + (r.away === undefined ? '' : r.away) + '" data-res="' + j.id + '" data-f="away"></span>' +
         '<span class="tn">' + esc(j.visitante) + '</span>' +
         '</div>' +
-        ((nh > 0 || na > 0) ? '<div class="scorers">' + scorerEditor(j, 'home', j.mandante, nh, r.homeScorers) + scorerEditor(j, 'away', j.visitante, na, r.awayScorers) + '</div>' : '') +
+        ((nh > 0 || na > 0) ? '<div class="scorers">' + scorerEditor(j, 'home', j.mandante, nh, r.homeScorers, ro) + scorerEditor(j, 'away', j.visitante, na, r.awayScorers, ro) + '</div>' : '') +
         '</div>';
     }).join('');
-    view.innerHTML = '<div class="card"><div class="hd"><div><h2>Jogos e Resultados</h2><div class="muted">Informe o placar real e os artilheiros na ordem dos gols (por time). Salvo automaticamente.</div></div></div>' +
-      '<div class="note">Os pontos só são contabilizados para jogos com placar preenchido. Confrontos provisórios dependem dos jogos pendentes dos Grupos J/K.</div>' +
+    var faseTxt = (window.CHAVEAMENTO && window.CHAVEAMENTO.faseAtual) ? window.CHAVEAMENTO.faseAtual : '';
+    var head = ro
+      ? (faseTxt ? faseTxt + ' · ' : '') + 'Resultados oficiais (somente leitura), atualizados pelo responsável.'
+      : (faseTxt ? faseTxt + ' · ' : '') + 'Informe o placar e os artilheiros (na ordem) e clique em <b>Publicar resultados</b> para todos verem.';
+    var actions = IS_AMARO
+      ? '<button class="btn ciano" onclick="MM.publicarResultados()">Publicar resultados</button>'
+      : (READ_ENDPOINT ? '<button class="btn ghost" onclick="MM.atualizar()">↻ Atualizar</button>' : '');
+    view.innerHTML = '<div class="card"><div class="hd"><div><h2>Jogos e Resultados</h2><div class="muted">' + head + '</div></div>' + actions + '</div>' +
+      '<p id="pubmsg" class="note" style="display:none"></p>' +
+      '<div class="note">Os pontos contam apenas para os jogos com placar preenchido.</div>' +
       '<div class="games">' + cards + '</div></div>';
   }
 
@@ -167,9 +196,12 @@
   }
 
   function renderCarregar() {
+    var autoBlock = READ_ENDPOINT
+      ? '<p class="muted">⚡ <b>Carregamento automático ativo</b> — os palpites são lidos da planilha do SharePoint. <button class="btn ghost" onclick="MM.atualizar()">↻ Atualizar agora</button></p><hr style="border:0;border-top:1px solid var(--linha);margin:16px 0"><p class="muted">Ou carregue manualmente um arquivo:</p>'
+      : '<p class="muted">Selecione a planilha <b>Palpites - Bolão Balera 2026 - Mata-Mata.xlsx</b> (abas “Palpites Placar” e “Palpites Gols por Jogador”). O app lê as duas abas e cruza por CPF.</p>';
     view.innerHTML = '<div class="card"><div class="hd"><h2>Carregar Palpites</h2></div>' +
       '<div class="uploadzone">' +
-      '<p class="muted">Selecione a planilha <b>Palpites - Bolão Balera 2026 - Mata-Mata.xlsx</b> (com as abas “Palpites Placar” e “Palpites Gols por Jogador”). O app lê as duas abas e cruza por CPF.</p>' +
+      autoBlock +
       '<button class="btn ciano" onclick="document.getElementById(\'file\').click()">Selecionar planilha (.xlsx)</button>' +
       '<input id="file" type="file" accept=".xlsx,.xls" onchange="MM.upload(this)">' +
       '<p id="upmsg" class="muted" style="margin-top:14px"></p>' +
@@ -268,10 +300,55 @@
     return Object.keys(byCpf).map(function (k) { return byCpf[k]; });
   }
 
+  // ---------- carregamento automático (fluxo de leitura) ----------
+  // Espera JSON: { participants:[{name,guesses}], realResults?:{...}, updatedAt? }
+  function autoLoad(manual) {
+    if (!READ_ENDPOINT) { if (manual) { activeTab = 'carregar'; render(); } return; }
+    autoState = 'loading';
+    if (activeTab === 'ranking') renderRanking();
+    fetch(READ_ENDPOINT, { method: 'POST', cache: 'no-store' })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (data) {
+        var d = (data && data.result) ? data.result : data; // tolera resposta aninhada em "result"
+        var list = d.participants || (Array.isArray(d) ? d : null);
+        if (list && list.length) { participants = list; save(LS_PART, participants); }
+        if (d.realResults && Object.keys(d.realResults).length) {
+          if (IS_AMARO) { // não sobrescreve edições locais ainda não publicadas
+            Object.keys(d.realResults).forEach(function (id) { if (!hasResult(realResults[id])) realResults[id] = d.realResults[id]; });
+          } else { // Geral: resultados oficiais mandam
+            realResults = d.realResults;
+          }
+          save(LS_RES, realResults);
+        }
+        lastUpdated = d.updatedAt || new Date().toISOString();
+        save('mm_updatedAt', lastUpdated);
+        autoState = 'ok';
+        if (activeTab === 'carregar' && participants.length) activeTab = 'ranking';
+        render();
+      })
+      .catch(function (e) { autoState = 'error'; console.error('autoLoad falhou:', e); render(); });
+  }
+
   // ---------- API global ----------
   window.MM = {
     _ingest: ingest,
     go: function (t) { activeTab = t; render(); },
+    atualizar: function () { autoLoad(true); },
+    publicarResultados: function () {
+      var msg = document.getElementById('pubmsg');
+      function show(t) { if (msg) { msg.style.display = 'block'; msg.textContent = t; } }
+      if (!WRITE_RESULTS_ENDPOINT) { show('Endpoint de publicação não configurado (config.js → WRITE_RESULTS_ENDPOINT).'); return; }
+      var results = JOGOS.filter(function (j) { return hasResult(realResults[j.id]); }).map(function (j) {
+        var r = realResults[j.id];
+        return { matchId: j.id, mandante: j.mandante, visitante: j.visitante, home: +r.home, away: +r.away,
+          homeScorers: (r.homeScorers || []).filter(Boolean), awayScorers: (r.awayScorers || []).filter(Boolean) };
+      });
+      show('Publicando ' + results.length + ' jogo(s)...');
+      fetch(WRITE_RESULTS_ENDPOINT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ results: results }) })
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+        .then(function () { show('✓ Resultados publicados (' + results.length + ' jogos). Os colaboradores já veem o ranking atualizado.'); })
+        .catch(function (e) { show('Falha ao publicar: ' + e.message); });
+    },
     busca: function (v) { search = v; var rk; clearTimeout(window.__t); window.__t = setTimeout(function () { renderRanking(); var inp = document.querySelector('.search'); if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); } }, 120); },
     detalhe: detalhe,
     limpar: function () { if (confirm('Remover todos os palpites carregados?')) { participants = []; save(LS_PART, participants); activeTab = 'carregar'; render(); } },
@@ -335,5 +412,11 @@
     }
   });
 
+  if (IS_AMARO) {
+    var _h1 = document.querySelector('header h1'); if (_h1) _h1.textContent = 'Mata-Mata · Ranking + Exportação';
+    var _sub = document.querySelector('header .sub'); if (_sub) _sub.textContent = 'Bolão Copa 2026 · Amaro';
+    document.title = 'Bolão BALERA — Mata-Mata 2026 · Ranking (Amaro / Intranet)';
+  }
   render();
+  if (READ_ENDPOINT) autoLoad(false);
 })();
